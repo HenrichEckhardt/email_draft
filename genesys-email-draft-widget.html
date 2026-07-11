@@ -135,21 +135,28 @@
     </div>
 
     <label for="subject">Subject</label>
-    <input id="subject" value="Re: Customer request" />
+    <input id="subject" placeholder="Leave empty to preserve the generated Genesys reply subject" />
 
-    <label for="textBody">Plain Text Body</label>
+    <label for="insertMode">Injection mode</label>
+    <select id="insertMode">
+      <option value="prepend">Add content before the generated signature/history</option>
+      <option value="append">Add content after the generated signature/history</option>
+      <option value="replace">Replace generated draft body with my content</option>
+    </select>
+
+    <label for="textBody">Plain Text Content To Add</label>
     <textarea id="textBody">Hello,
 
 This is a generated draft inserted by the external interaction widget.
 
-Regards,</textarea>
+</textarea>
 
-    <label for="htmlBody">HTML Body</label>
-    <textarea id="htmlBody"><p>Hello,</p><p>This is a generated draft inserted by the external interaction widget.</p><p>Regards,</p></textarea>
+    <label for="htmlBody">HTML Content To Add</label>
+    <textarea id="htmlBody"><p>Hello,</p><p>This is a generated draft inserted by the external interaction widget.</p></textarea>
 
     <div class="row">
       <button id="getDraftBtn" class="secondary" type="button" disabled>Get Current Draft</button>
-      <button id="injectBtn" type="button" disabled>Inject Draft</button>
+      <button id="injectBtn" type="button" disabled>Reset, Generate Reply, Add Text</button>
     </div>
 
     <div id="status" class="status">Initializing...</div>
@@ -186,7 +193,6 @@ Regards,</textarea>
     const platformClient = require("platformClient");
     const client = platformClient.ApiClient.instance;
     const conversationsApi = new platformClient.ConversationsApi();
-    const usersApi = new platformClient.UsersApi();
 
     const els = {
       region: document.getElementById("region"),
@@ -198,6 +204,7 @@ Regards,</textarea>
       activeEmailArea: document.getElementById("activeEmailArea"),
       activeEmails: document.getElementById("activeEmails"),
       subject: document.getElementById("subject"),
+      insertMode: document.getElementById("insertMode"),
       textBody: document.getElementById("textBody"),
       htmlBody: document.getElementById("htmlBody"),
       status: document.getElementById("status")
@@ -253,10 +260,14 @@ Regards,</textarea>
       const subject = getParam("subject");
       const textBody = getParam("textBody");
       const htmlBody = getParam("htmlBody");
+      const insertMode = getParam("insertMode");
 
       if (subject) els.subject.value = subject;
       if (textBody) els.textBody.value = textBody;
       if (htmlBody) els.htmlBody.value = htmlBody;
+      if (insertMode && [...els.insertMode.options].some(o => o.value === insertMode)) {
+        els.insertMode.value = insertMode;
+      }
     }
 
     function requireConfiguredClientId() {
@@ -278,11 +289,10 @@ Regards,</textarea>
         state: "genesys-email-draft-widget"
       });
 
-      const me = await usersApi.getUsersMe();
       els.loadActiveBtn.disabled = false;
       els.getDraftBtn.disabled = false;
       els.injectBtn.disabled = false;
-      setStatus("Authenticated as: " + (me.name || me.id), "success");
+      setStatus("Authenticated with Genesys Cloud as the current agent.", "success");
 
       if (CONFIG.autoLoadActiveEmails) {
         await loadActiveEmails();
@@ -348,11 +358,125 @@ Regards,</textarea>
 
       setStatus("Reading current draft...");
       try {
-        const draft = await conversationsApi.getConversationsEmailMessagesDraft(conversationId);
+        const draft = await readDraft(conversationId);
         setStatus("Current draft:\n" + JSON.stringify(draft, null, 2), "success");
       } catch (err) {
         setStatus("Failed to get draft:\n" + formatError(err), "error");
       }
+    }
+
+    async function readDraft(conversationId) {
+      return conversationsApi.getConversationsEmailMessagesDraft(conversationId);
+    }
+
+    async function resetAndAutoFillDraft(conversationId) {
+      // This is the important step that mimics starting a fresh reply in Genesys Cloud.
+      // discard=true resets/removes the existing draft content.
+      // autoFill=true asks Genesys Cloud to generate the base reply content, including
+      // org/user defaults such as the agent signature when configured.
+      return conversationsApi.patchConversationsEmailMessagesDraft(conversationId, {
+        discard: true,
+        autoFill: true,
+        body: {}
+      });
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function hasUsableDraftContent(draft) {
+      if (!draft) return false;
+      return Boolean(
+        (typeof draft.htmlBody === "string" && draft.htmlBody.trim()) ||
+        (typeof draft.textBody === "string" && draft.textBody.trim()) ||
+        (typeof draft.subject === "string" && draft.subject.trim()) ||
+        Array.isArray(draft.to) || Array.isArray(draft.cc) || Array.isArray(draft.bcc)
+      );
+    }
+
+    async function waitForGeneratedDraft(conversationId, firstDraft) {
+      if (hasUsableDraftContent(firstDraft)) return firstDraft;
+
+      let lastDraft = firstDraft;
+      for (let i = 0; i < 6; i++) {
+        await sleep(500);
+        try {
+          lastDraft = await readDraft(conversationId);
+          if (hasUsableDraftContent(lastDraft)) return lastDraft;
+        } catch (err) {
+          // Keep polling briefly; draft generation can lag immediately after reset/autofill.
+          lastDraft = null;
+        }
+      }
+      return lastDraft || {};
+    }
+
+    function normalizeHtmlFragment(html) {
+      const value = (html || "").trim();
+      if (!value) return "";
+      return value;
+    }
+
+    function normalizeTextFragment(text) {
+      const value = text || "";
+      return value.replace(/\s+$/g, "");
+    }
+
+    function combineText(injectedText, baseText, mode) {
+      const add = normalizeTextFragment(injectedText);
+      const base = baseText || "";
+
+      if (mode === "replace") return add;
+      if (!add) return base;
+      if (!base) return add;
+      if (mode === "append") return base.replace(/\s+$/g, "") + "\n\n" + add;
+      return add + "\n\n" + base.replace(/^\s+/g, "");
+    }
+
+    function combineHtml(injectedHtml, baseHtml, mode) {
+      const add = normalizeHtmlFragment(injectedHtml);
+      const base = baseHtml || "";
+
+      if (mode === "replace") return add;
+      if (!add) return base;
+      if (!base) return add;
+      if (mode === "append") return base + "<br>" + add;
+      return add + "<br>" + base;
+    }
+
+    function buildDraftUpdateBody(generatedDraft) {
+      const mode = els.insertMode.value || "prepend";
+      const update = {};
+
+      // Preserve addressing and reply metadata from the newly generated Genesys draft.
+      // This avoids losing To/Cc/Bcc/reply mode values created by the native reply workflow.
+      [
+        "to",
+        "cc",
+        "bcc",
+        "from",
+        "replyTo",
+        "subject",
+        "historyIncluded",
+        "draftType"
+      ].forEach(key => {
+        if (generatedDraft && generatedDraft[key] !== undefined && generatedDraft[key] !== null) {
+          update[key] = generatedDraft[key];
+        }
+      });
+
+      // Subject from UI wins only when the user typed something. Otherwise preserve Genesys draft subject.
+      const uiSubject = els.subject.value.trim();
+      if (uiSubject) update.subject = uiSubject;
+
+      update.textBody = combineText(els.textBody.value, generatedDraft && generatedDraft.textBody, mode);
+      update.htmlBody = combineHtml(els.htmlBody.value, generatedDraft && generatedDraft.htmlBody, mode);
+
+      if (!update.draftType) update.draftType = "Reply";
+      if (update.historyIncluded === undefined) update.historyIncluded = true;
+
+      return update;
     }
 
     async function injectDraft() {
@@ -362,20 +486,47 @@ Regards,</textarea>
         return;
       }
 
-      const body = {
-        subject: els.subject.value,
-        textBody: els.textBody.value,
-        htmlBody: els.htmlBody.value,
-        historyIncluded: true,
-        draftType: "Reply"
-      };
+      setStatus(
+        "Step 1/4: Reading current draft...\n" +
+        "Step 2/4: Resetting the draft and asking Genesys Cloud to auto-fill a fresh reply..."
+      );
 
-      setStatus("Updating email draft for conversation " + conversationId + "...");
       try {
-        const response = await conversationsApi.putConversationsEmailMessagesDraft(conversationId, body);
-        setStatus("Draft injected successfully.\n\nResponse:\n" + JSON.stringify(response, null, 2), "success");
+        let originalDraft = null;
+        try {
+          originalDraft = await readDraft(conversationId);
+        } catch (err) {
+          // If there is no active draft yet, continue to PATCH autoFill below.
+          originalDraft = null;
+        }
+
+        const generatedFromPatch = await resetAndAutoFillDraft(conversationId);
+
+        setStatus(
+          "Step 1/4: Original draft read " + (originalDraft ? "successfully" : "was not available") + ".\n" +
+          "Step 2/4: Fresh reply requested.\n" +
+          "Step 3/4: Re-reading generated reply/signature..."
+        );
+
+        const generatedDraft = await waitForGeneratedDraft(conversationId, generatedFromPatch);
+        const updateBody = buildDraftUpdateBody(generatedDraft || {});
+
+        setStatus(
+          "Step 1/4: Original draft read " + (originalDraft ? "successfully" : "was not available") + ".\n" +
+          "Step 2/4: Fresh reply requested.\n" +
+          "Step 3/4: Generated reply/signature read.\n" +
+          "Step 4/4: Injecting final draft content..."
+        );
+
+        const response = await conversationsApi.putConversationsEmailMessagesDraft(conversationId, updateBody);
+        setStatus(
+          "Draft reset, regenerated, and updated successfully.\n\n" +
+          "Final PUT body:\n" + JSON.stringify(updateBody, null, 2) +
+          "\n\nResponse:\n" + JSON.stringify(response, null, 2),
+          "success"
+        );
       } catch (err) {
-        setStatus("Failed to inject draft:\n" + formatError(err), "error");
+        setStatus("Failed to reset/generate/inject draft:\n" + formatError(err), "error");
       }
     }
 

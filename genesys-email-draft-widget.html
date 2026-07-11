@@ -103,7 +103,7 @@
   <div class="card">
     <h1>Genesys Email Draft Injector</h1>
     <div class="small">
-      This page logs in with the active agent's Genesys Cloud user context using OAuth PKCE, then updates the selected active email conversation draft.
+      This page logs in with the active agent's Genesys Cloud user context using OAuth PKCE, reads the current active email reply draft, merges the template content, and writes the complete merged draft back.
     </div>
 
     <label for="region">Genesys Cloud Region</label>
@@ -139,9 +139,9 @@
 
     <label for="insertMode">Injection mode</label>
     <select id="insertMode">
-      <option value="prepend">Add content before the generated signature/history</option>
-      <option value="append">Add content after the generated signature/history</option>
-      <option value="replace">Replace generated draft body with my content</option>
+      <option value="prepend">Add template before current draft content</option>
+      <option value="append">Add template after current draft content</option>
+      <option value="replace">Replace current draft body with template</option>
     </select>
 
     <label for="textBody">Plain Text Content To Add</label>
@@ -156,7 +156,7 @@ This is a generated draft inserted by the external interaction widget.
 
     <div class="row">
       <button id="getDraftBtn" class="secondary" type="button" disabled>Get Current Draft</button>
-      <button id="injectBtn" type="button" disabled>Reset, Generate Reply, Add Text</button>
+      <button id="injectBtn" type="button" disabled>Read Current Draft and Inject Template</button>
     </div>
 
     <div id="status" class="status">Initializing...</div>
@@ -173,7 +173,7 @@ This is a generated draft inserted by the external interaction widget.
      * https://YOUR_GITHUB_USER.github.io/YOUR_REPO/genesys-email-draft-widget.html
      **********************************************************************/
     const CONFIG = {
-      clientId: "21f0686f-cc19-43e5-bdfa-b074cbbe0479",
+       clientId: "21f0686f-cc19-43e5-bdfa-b074cbbe0479",
 
       // Must exactly match the URL configured on the OAuth client.
       // Leaving this as window.location.origin + window.location.pathname works well for GitHub Pages.
@@ -185,7 +185,7 @@ This is a generated draft inserted by the external interaction widget.
       // Automatically load active emails after login.
       autoLoadActiveEmails: true,
 
-      // Automatically inject when autoInject=true appears in the URL.
+      // Automatically inject into the existing current draft when autoInject=true appears in the URL.
       // Example: ?conversationId=...&autoInject=true
       allowAutoInjectFromUrl: true
     };
@@ -369,47 +369,12 @@ This is a generated draft inserted by the external interaction widget.
       return conversationsApi.getConversationsEmailMessagesDraft(conversationId);
     }
 
-    async function resetAndAutoFillDraft(conversationId) {
-      // This is the important step that mimics starting a fresh reply in Genesys Cloud.
-      // discard=true resets/removes the existing draft content.
-      // autoFill=true asks Genesys Cloud to generate the base reply content, including
-      // org/user defaults such as the agent signature when configured.
-      return conversationsApi.patchConversationsEmailMessagesDraft(conversationId, {
-        discard: true,
-        autoFill: true,
-        body: {}
-      });
-    }
-
-    function sleep(ms) {
-      return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    function hasUsableDraftContent(draft) {
+    function hasDraftBody(draft) {
       if (!draft) return false;
       return Boolean(
         (typeof draft.htmlBody === "string" && draft.htmlBody.trim()) ||
-        (typeof draft.textBody === "string" && draft.textBody.trim()) ||
-        (typeof draft.subject === "string" && draft.subject.trim()) ||
-        Array.isArray(draft.to) || Array.isArray(draft.cc) || Array.isArray(draft.bcc)
+        (typeof draft.textBody === "string" && draft.textBody.trim())
       );
-    }
-
-    async function waitForGeneratedDraft(conversationId, firstDraft) {
-      if (hasUsableDraftContent(firstDraft)) return firstDraft;
-
-      let lastDraft = firstDraft;
-      for (let i = 0; i < 6; i++) {
-        await sleep(500);
-        try {
-          lastDraft = await readDraft(conversationId);
-          if (hasUsableDraftContent(lastDraft)) return lastDraft;
-        } catch (err) {
-          // Keep polling briefly; draft generation can lag immediately after reset/autofill.
-          lastDraft = null;
-        }
-      }
-      return lastDraft || {};
     }
 
     function normalizeHtmlFragment(html) {
@@ -445,12 +410,12 @@ This is a generated draft inserted by the external interaction widget.
       return add + "<br>" + base;
     }
 
-    function buildDraftUpdateBody(generatedDraft) {
+    function buildDraftUpdateBody(currentDraft) {
       const mode = els.insertMode.value || "prepend";
       const update = {};
 
-      // Preserve addressing and reply metadata from the newly generated Genesys draft.
-      // This avoids losing To/Cc/Bcc/reply mode values created by the native reply workflow.
+      // Preserve the current active draft metadata and addressing exactly as returned by Genesys Cloud.
+      // The important change is only htmlBody/textBody, merged with the widget template.
       [
         "to",
         "cc",
@@ -459,19 +424,20 @@ This is a generated draft inserted by the external interaction widget.
         "replyTo",
         "subject",
         "historyIncluded",
-        "draftType"
+        "draftType",
+        "attachments"
       ].forEach(key => {
-        if (generatedDraft && generatedDraft[key] !== undefined && generatedDraft[key] !== null) {
-          update[key] = generatedDraft[key];
+        if (currentDraft && currentDraft[key] !== undefined && currentDraft[key] !== null) {
+          update[key] = currentDraft[key];
         }
       });
 
-      // Subject from UI wins only when the user typed something. Otherwise preserve Genesys draft subject.
+      // Subject from UI wins only when the user typed something. Otherwise preserve the current draft subject.
       const uiSubject = els.subject.value.trim();
       if (uiSubject) update.subject = uiSubject;
 
-      update.textBody = combineText(els.textBody.value, generatedDraft && generatedDraft.textBody, mode);
-      update.htmlBody = combineHtml(els.htmlBody.value, generatedDraft && generatedDraft.htmlBody, mode);
+      update.textBody = combineText(els.textBody.value, currentDraft && currentDraft.textBody, mode);
+      update.htmlBody = combineHtml(els.htmlBody.value, currentDraft && currentDraft.htmlBody, mode);
 
       if (!update.draftType) update.draftType = "Reply";
       if (update.historyIncluded === undefined) update.historyIncluded = true;
@@ -487,46 +453,45 @@ This is a generated draft inserted by the external interaction widget.
       }
 
       setStatus(
-        "Step 1/4: Reading current draft...\n" +
-        "Step 2/4: Resetting the draft and asking Genesys Cloud to auto-fill a fresh reply..."
+        "Step 1/3: Reading the current active draft from Genesys Cloud...\n" +
+        "No reset/autofill will be performed. The current GUI draft body will be preserved and merged."
       );
 
       try {
-        let originalDraft = null;
-        try {
-          originalDraft = await readDraft(conversationId);
-        } catch (err) {
-          // If there is no active draft yet, continue to PATCH autoFill below.
-          originalDraft = null;
+        const currentDraft = await readDraft(conversationId);
+
+        if (!hasDraftBody(currentDraft)) {
+          setStatus(
+            "No current draft body was returned for this conversation.\n\n" +
+            "Open Reply in the Genesys Cloud email UI first so the signature/body is generated, then click Inject again.",
+            "error"
+          );
+          return;
         }
 
-        const generatedFromPatch = await resetAndAutoFillDraft(conversationId);
-
         setStatus(
-          "Step 1/4: Original draft read " + (originalDraft ? "successfully" : "was not available") + ".\n" +
-          "Step 2/4: Fresh reply requested.\n" +
-          "Step 3/4: Re-reading generated reply/signature..."
+          "Step 1/3: Current draft read successfully.\n" +
+          "Step 2/3: Merging template content with the current draft..."
         );
 
-        const generatedDraft = await waitForGeneratedDraft(conversationId, generatedFromPatch);
-        const updateBody = buildDraftUpdateBody(generatedDraft || {});
+        const updateBody = buildDraftUpdateBody(currentDraft);
 
         setStatus(
-          "Step 1/4: Original draft read " + (originalDraft ? "successfully" : "was not available") + ".\n" +
-          "Step 2/4: Fresh reply requested.\n" +
-          "Step 3/4: Generated reply/signature read.\n" +
-          "Step 4/4: Injecting final draft content..."
+          "Step 1/3: Current draft read successfully.\n" +
+          "Step 2/3: Template merged with current draft.\n" +
+          "Step 3/3: Writing the complete merged draft back to Genesys Cloud..."
         );
 
         const response = await conversationsApi.putConversationsEmailMessagesDraft(conversationId, updateBody);
         setStatus(
-          "Draft reset, regenerated, and updated successfully.\n\n" +
+          "Current draft updated successfully.\n\n" +
+          "The widget read the active draft, merged the template, and PUT the complete merged content back.\n\n" +
           "Final PUT body:\n" + JSON.stringify(updateBody, null, 2) +
           "\n\nResponse:\n" + JSON.stringify(response, null, 2),
           "success"
         );
       } catch (err) {
-        setStatus("Failed to reset/generate/inject draft:\n" + formatError(err), "error");
+        setStatus("Failed to read/merge/update the current draft:\n" + formatError(err), "error");
       }
     }
 

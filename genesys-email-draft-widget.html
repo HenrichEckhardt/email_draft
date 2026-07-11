@@ -103,7 +103,7 @@
   <div class="card">
     <h1>Genesys Email Draft Injector</h1>
     <div class="small">
-      This page logs in with the active agent's Genesys Cloud user context using OAuth PKCE, reads the current active email reply draft, merges the template content, and writes the complete merged draft back.
+      This page logs in with the active agent's Genesys Cloud user context using OAuth PKCE, reads the current active email reply draft, merges the template content, discards the old draft, and recreates the draft with the merged content. If no draft exists, it creates one from the widget template.
     </div>
 
     <label for="region">Genesys Cloud Region</label>
@@ -156,7 +156,7 @@ This is a generated draft inserted by the external interaction widget.
 
     <div class="row">
       <button id="getDraftBtn" class="secondary" type="button" disabled>Get Current Draft</button>
-      <button id="injectBtn" type="button" disabled>Read Current Draft and Inject Template</button>
+      <button id="injectBtn" type="button" disabled>Recreate Draft With Template</button>
     </div>
 
     <div id="status" class="status">Initializing...</div>
@@ -369,12 +369,86 @@ This is a generated draft inserted by the external interaction widget.
       return conversationsApi.getConversationsEmailMessagesDraft(conversationId);
     }
 
+    async function discardDraft(conversationId) {
+      // Genesys Cloud does not expose a DELETE draft endpoint in this API surface.
+      // PATCH with discard=true is the supported reset/discard operation.
+      return conversationsApi.patchConversationsEmailMessagesDraft(conversationId, {
+        discard: true,
+        autoFill: false,
+        body: {}
+      });
+    }
+
+    async function discardAndAutoFillDraft(conversationId) {
+      // Used only when there is no readable active draft. This asks Genesys Cloud
+      // to initialize a reply draft so we can preserve generated metadata such as
+      // from/to/subject/draftType before replacing the body with the widget template.
+      return conversationsApi.patchConversationsEmailMessagesDraft(conversationId, {
+        discard: true,
+        autoFill: true,
+        body: {}
+      });
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
     function hasDraftBody(draft) {
       if (!draft) return false;
       return Boolean(
         (typeof draft.htmlBody === "string" && draft.htmlBody.trim()) ||
         (typeof draft.textBody === "string" && draft.textBody.trim())
       );
+    }
+
+    function hasDraftMetadata(draft) {
+      if (!draft) return false;
+      return Boolean(
+        (typeof draft.subject === "string" && draft.subject.trim()) ||
+        Array.isArray(draft.to) ||
+        Array.isArray(draft.cc) ||
+        Array.isArray(draft.bcc) ||
+        draft.from ||
+        draft.replyTo ||
+        draft.draftType
+      );
+    }
+
+    function hasUsableDraft(draft) {
+      return hasDraftBody(draft) || hasDraftMetadata(draft);
+    }
+
+    function hasTemplateContent() {
+      return Boolean(
+        (els.htmlBody.value && els.htmlBody.value.trim()) ||
+        (els.textBody.value && els.textBody.value.trim())
+      );
+    }
+
+    async function readDraftOrNull(conversationId) {
+      try {
+        const draft = await readDraft(conversationId);
+        return hasUsableDraft(draft) ? draft : null;
+      } catch (err) {
+        return null;
+      }
+    }
+
+    async function waitForDraftAfterAutoFill(conversationId, firstDraft) {
+      if (hasUsableDraft(firstDraft)) return firstDraft;
+
+      let lastDraft = firstDraft;
+      for (let i = 0; i < 8; i++) {
+        await sleep(500);
+        try {
+          lastDraft = await readDraft(conversationId);
+          if (hasUsableDraft(lastDraft)) return lastDraft;
+        } catch (err) {
+          lastDraft = null;
+        }
+      }
+      return lastDraft || {};
     }
 
     function normalizeHtmlFragment(html) {
@@ -410,12 +484,12 @@ This is a generated draft inserted by the external interaction widget.
       return add + "<br>" + base;
     }
 
-    function buildDraftUpdateBody(currentDraft) {
-      const mode = els.insertMode.value || "prepend";
+    function copyDraftMetadata(sourceDraft) {
       const update = {};
 
-      // Preserve the current active draft metadata and addressing exactly as returned by Genesys Cloud.
-      // The important change is only htmlBody/textBody, merged with the widget template.
+      // Preserve addressing and reply metadata from the active/generated draft.
+      // The user-visible body is rebuilt below; these fields maintain the same
+      // from/to/subject context after the original draft is discarded.
       [
         "to",
         "cc",
@@ -427,22 +501,35 @@ This is a generated draft inserted by the external interaction widget.
         "draftType",
         "attachments"
       ].forEach(key => {
-        if (currentDraft && currentDraft[key] !== undefined && currentDraft[key] !== null) {
-          update[key] = currentDraft[key];
+        if (sourceDraft && sourceDraft[key] !== undefined && sourceDraft[key] !== null) {
+          update[key] = sourceDraft[key];
         }
       });
 
-      // Subject from UI wins only when the user typed something. Otherwise preserve the current draft subject.
       const uiSubject = els.subject.value.trim();
       if (uiSubject) update.subject = uiSubject;
-
-      update.textBody = combineText(els.textBody.value, currentDraft && currentDraft.textBody, mode);
-      update.htmlBody = combineHtml(els.htmlBody.value, currentDraft && currentDraft.htmlBody, mode);
 
       if (!update.draftType) update.draftType = "Reply";
       if (update.historyIncluded === undefined) update.historyIncluded = true;
 
       return update;
+    }
+
+    function buildMergedDraftBody(sourceDraft, options) {
+      const mode = options && options.templateOnly ? "replace" : (els.insertMode.value || "prepend");
+      const update = copyDraftMetadata(sourceDraft || {});
+
+      update.textBody = combineText(els.textBody.value, sourceDraft && sourceDraft.textBody, mode);
+      update.htmlBody = combineHtml(els.htmlBody.value, sourceDraft && sourceDraft.htmlBody, mode);
+
+      return update;
+    }
+
+    async function recreateDraftFromFinalBody(conversationId, finalBody) {
+      await discardDraft(conversationId);
+      // Give the email service a short moment to finish discarding before PUT.
+      await sleep(300);
+      return conversationsApi.putConversationsEmailMessagesDraft(conversationId, finalBody);
     }
 
     async function injectDraft() {
@@ -451,47 +538,60 @@ This is a generated draft inserted by the external interaction widget.
         setStatus("Missing conversationId. Pass it in the URL or load active emails.", "error");
         return;
       }
+      if (!hasTemplateContent()) {
+        setStatus("Template content is empty. Add HTML and/or plain text content before injecting.", "error");
+        return;
+      }
 
       setStatus(
-        "Step 1/3: Reading the current active draft from Genesys Cloud...\n" +
-        "No reset/autofill will be performed. The current GUI draft body will be preserved and merged."
+        "Step 1/5: Reading the current active draft from Genesys Cloud...\n" +
+        "If a draft exists, it will be merged with the template, then discarded and recreated."
       );
 
       try {
-        const currentDraft = await readDraft(conversationId);
+        let sourceDraft = await readDraftOrNull(conversationId);
+        let createdFromTemplateOnly = false;
 
-        if (!hasDraftBody(currentDraft)) {
+        if (!sourceDraft) {
           setStatus(
-            "No current draft body was returned for this conversation.\n\n" +
-            "Open Reply in the Genesys Cloud email UI first so the signature/body is generated, then click Inject again.",
-            "error"
+            "Step 1/5: No readable active draft was found.\n" +
+            "Step 2/5: Creating a base reply draft so Genesys Cloud provides from/to/subject metadata..."
           );
-          return;
+
+          const generated = await discardAndAutoFillDraft(conversationId);
+          sourceDraft = await waitForDraftAfterAutoFill(conversationId, generated);
+          createdFromTemplateOnly = true;
         }
 
         setStatus(
-          "Step 1/3: Current draft read successfully.\n" +
-          "Step 2/3: Merging template content with the current draft..."
+          "Step 1/5: Source draft available.\n" +
+          "Step 2/5: Building the final draft body " +
+          (createdFromTemplateOnly ? "from the widget template." : "by merging the widget template with the current draft.")
         );
 
-        const updateBody = buildDraftUpdateBody(currentDraft);
+        const finalBody = buildMergedDraftBody(sourceDraft || {}, {
+          templateOnly: createdFromTemplateOnly && !hasDraftBody(sourceDraft)
+        });
 
         setStatus(
-          "Step 1/3: Current draft read successfully.\n" +
-          "Step 2/3: Template merged with current draft.\n" +
-          "Step 3/3: Writing the complete merged draft back to Genesys Cloud..."
+          "Step 1/5: Source draft available.\n" +
+          "Step 2/5: Final draft body prepared.\n" +
+          "Step 3/5: Discarding the original draft..."
         );
 
-        const response = await conversationsApi.putConversationsEmailMessagesDraft(conversationId, updateBody);
+        const response = await recreateDraftFromFinalBody(conversationId, finalBody);
+
         setStatus(
-          "Current draft updated successfully.\n\n" +
-          "The widget read the active draft, merged the template, and PUT the complete merged content back.\n\n" +
-          "Final PUT body:\n" + JSON.stringify(updateBody, null, 2) +
+          "Draft recreated successfully.\n\n" +
+          (createdFromTemplateOnly
+            ? "No active draft existed, so the widget created a new reply draft from the template and preserved generated metadata where available.\n\n"
+            : "The widget read the current active draft, merged the template, discarded the original draft, and recreated it with the merged content.\n\n") +
+          "Final PUT body:\n" + JSON.stringify(finalBody, null, 2) +
           "\n\nResponse:\n" + JSON.stringify(response, null, 2),
           "success"
         );
       } catch (err) {
-        setStatus("Failed to read/merge/update the current draft:\n" + formatError(err), "error");
+        setStatus("Failed to recreate/update draft:\n" + formatError(err), "error");
       }
     }
 

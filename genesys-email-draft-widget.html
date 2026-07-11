@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Genesys Email Draft Injector</title>
+
+  <!-- Genesys Cloud Platform API JavaScript SDK -->
+  <script src="https://sdk-cdn.mypurecloud.com/javascript/latest/purecloud-platform-client-v2.min.js"></script>
+
+  <style>
+    :root {
+      font-family: Arial, Helvetica, sans-serif;
+      color: #222;
+      background: #f7f8fa;
+    }
+    body {
+      margin: 0;
+      padding: 12px;
+      font-size: 14px;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    h1 {
+      font-size: 16px;
+      margin: 0 0 10px;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      margin: 10px 0 4px;
+    }
+    input, select, textarea, button {
+      width: 100%;
+      box-sizing: border-box;
+      font: inherit;
+    }
+    input, select, textarea {
+      border: 1px solid #c9ced6;
+      border-radius: 5px;
+      padding: 8px;
+      background: #fff;
+    }
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+    button {
+      border: 0;
+      border-radius: 5px;
+      padding: 9px 12px;
+      margin-top: 10px;
+      cursor: pointer;
+      font-weight: 600;
+      background: #2f6fed;
+      color: #fff;
+    }
+    button.secondary {
+      background: #5f6b7a;
+    }
+    button:disabled {
+      background: #adb5bd;
+      cursor: not-allowed;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .status {
+      margin-top: 10px;
+      padding: 8px;
+      border-radius: 5px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #eef3ff;
+      border: 1px solid #c8d7ff;
+    }
+    .status.error {
+      background: #fff0f0;
+      border-color: #ffcaca;
+    }
+    .status.success {
+      background: #eefaf1;
+      border-color: #c8edcf;
+    }
+    .small {
+      font-size: 12px;
+      color: #606975;
+      line-height: 1.35;
+    }
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Genesys Email Draft Injector</h1>
+    <div class="small">
+      This page logs in with the active agent's Genesys Cloud user context using OAuth PKCE, then updates the selected active email conversation draft.
+    </div>
+
+    <label for="region">Genesys Cloud Region</label>
+    <select id="region">
+      <option value="eu_west_1">EU West 1 - mypurecloud.ie</option>
+      <option value="eu_central_1">EU Central 1 - mypurecloud.de</option>
+      <option value="us_east_1">US East 1 - mypurecloud.com</option>
+      <option value="us_west_2">US West 2 - usw2.pure.cloud</option>
+      <option value="ca_central_1">Canada - cac1.pure.cloud</option>
+      <option value="ap_southeast_2">AP Southeast 2 - mypurecloud.com.au</option>
+      <option value="ap_northeast_1">AP Northeast 1 - mypurecloud.jp</option>
+      <option value="ap_northeast_2">AP Northeast 2 - apne2.pure.cloud</option>
+      <option value="ap_south_1">AP South 1 - aps1.pure.cloud</option>
+      <option value="sa_east_1">SA East 1 - sae1.pure.cloud</option>
+      <option value="me_central_1">ME Central 1 - mec1.pure.cloud</option>
+    </select>
+
+    <label for="conversationId">Conversation ID</label>
+    <input id="conversationId" placeholder="Passed by widget URL or selected from active emails" />
+
+    <div class="row">
+      <button id="loginBtn" type="button">Login / Refresh Token</button>
+      <button id="loadActiveBtn" class="secondary" type="button" disabled>Load Active Emails</button>
+    </div>
+
+    <div id="activeEmailArea" class="hidden">
+      <label for="activeEmails">Active email conversations for this agent</label>
+      <select id="activeEmails"></select>
+    </div>
+
+    <label for="subject">Subject</label>
+    <input id="subject" value="Re: Customer request" />
+
+    <label for="textBody">Plain Text Body</label>
+    <textarea id="textBody">Hello,
+
+This is a generated draft inserted by the external interaction widget.
+
+Regards,</textarea>
+
+    <label for="htmlBody">HTML Body</label>
+    <textarea id="htmlBody"><p>Hello,</p><p>This is a generated draft inserted by the external interaction widget.</p><p>Regards,</p></textarea>
+
+    <div class="row">
+      <button id="getDraftBtn" class="secondary" type="button" disabled>Get Current Draft</button>
+      <button id="injectBtn" type="button" disabled>Inject Draft</button>
+    </div>
+
+    <div id="status" class="status">Initializing...</div>
+  </div>
+
+  <script>
+    /**********************************************************************
+     * REQUIRED CONFIGURATION
+     * 1. Create a Genesys Cloud OAuth client with Authorization Code / PKCE.
+     * 2. Put the client ID below.
+     * 3. Add your GitHub Pages URL as an authorized redirect URI exactly.
+     *
+     * Example redirect URI:
+     * https://YOUR_GITHUB_USER.github.io/YOUR_REPO/genesys-email-draft-widget.html
+     **********************************************************************/
+    const CONFIG = {
+      clientId: "PASTE_YOUR_GENESYS_CLOUD_PKCE_OAUTH_CLIENT_ID_HERE",
+
+      // Must exactly match the URL configured on the OAuth client.
+      // Leaving this as window.location.origin + window.location.pathname works well for GitHub Pages.
+      redirectUri: window.location.origin + window.location.pathname,
+
+      // Automatically start OAuth login when page loads.
+      autoLogin: true,
+
+      // Automatically load active emails after login.
+      autoLoadActiveEmails: true,
+
+      // Automatically inject when autoInject=true appears in the URL.
+      // Example: ?conversationId=...&autoInject=true
+      allowAutoInjectFromUrl: true
+    };
+
+    const platformClient = require("platformClient");
+    const client = platformClient.ApiClient.instance;
+    const conversationsApi = new platformClient.ConversationsApi();
+    const usersApi = new platformClient.UsersApi();
+
+    const els = {
+      region: document.getElementById("region"),
+      conversationId: document.getElementById("conversationId"),
+      loginBtn: document.getElementById("loginBtn"),
+      loadActiveBtn: document.getElementById("loadActiveBtn"),
+      getDraftBtn: document.getElementById("getDraftBtn"),
+      injectBtn: document.getElementById("injectBtn"),
+      activeEmailArea: document.getElementById("activeEmailArea"),
+      activeEmails: document.getElementById("activeEmails"),
+      subject: document.getElementById("subject"),
+      textBody: document.getElementById("textBody"),
+      htmlBody: document.getElementById("htmlBody"),
+      status: document.getElementById("status")
+    };
+
+    function setStatus(message, type) {
+      els.status.textContent = message;
+      els.status.className = "status" + (type ? " " + type : "");
+    }
+
+    function getParam(name) {
+      const params = new URLSearchParams(window.location.search);
+      return params.get(name);
+    }
+
+    function getFirstParam(names) {
+      for (const name of names) {
+        const value = getParam(name);
+        if (value) return value;
+      }
+      return "";
+    }
+
+    function setRegion(regionKey) {
+      const hosts = platformClient.PureCloudRegionHosts;
+      if (!hosts[regionKey]) {
+        throw new Error("Unknown Genesys Cloud region key: " + regionKey);
+      }
+      client.setEnvironment(hosts[regionKey]);
+      localStorage.setItem("gc_draft_widget_region", regionKey);
+    }
+
+    function applyUrlConfiguration() {
+      const savedRegion = localStorage.getItem("gc_draft_widget_region");
+      const regionFromUrl = getFirstParam(["region", "gc_region", "environment"]);
+      const region = regionFromUrl || savedRegion || els.region.value;
+
+      if ([...els.region.options].some(o => o.value === region)) {
+        els.region.value = region;
+      }
+      setRegion(els.region.value);
+
+      const conversationId = getFirstParam([
+        "conversationId",
+        "gcConversationId",
+        "interactionId",
+        "conversation_id"
+      ]);
+      if (conversationId) {
+        els.conversationId.value = conversationId;
+      }
+
+      const subject = getParam("subject");
+      const textBody = getParam("textBody");
+      const htmlBody = getParam("htmlBody");
+
+      if (subject) els.subject.value = subject;
+      if (textBody) els.textBody.value = textBody;
+      if (htmlBody) els.htmlBody.value = htmlBody;
+    }
+
+    function requireConfiguredClientId() {
+      if (!CONFIG.clientId || CONFIG.clientId.includes("PASTE_YOUR")) {
+        throw new Error("Configure CONFIG.clientId with your Genesys Cloud OAuth PKCE client ID first.");
+      }
+    }
+
+    async function login() {
+      requireConfiguredClientId();
+      setRegion(els.region.value);
+
+      setStatus("Authenticating with Genesys Cloud as the current agent...");
+
+      // Persist token/settings across iframe reloads.
+      client.setPersistSettings(true, "gc_draft_widget");
+
+      await client.loginPKCEGrant(CONFIG.clientId, CONFIG.redirectUri, {
+        state: "genesys-email-draft-widget"
+      });
+
+      const me = await usersApi.getUsersMe();
+      els.loadActiveBtn.disabled = false;
+      els.getDraftBtn.disabled = false;
+      els.injectBtn.disabled = false;
+      setStatus("Authenticated as: " + (me.name || me.id), "success");
+
+      if (CONFIG.autoLoadActiveEmails) {
+        await loadActiveEmails();
+      }
+
+      if (CONFIG.allowAutoInjectFromUrl && getParam("autoInject") === "true") {
+        await injectDraft();
+      }
+    }
+
+    function summarizeConversation(conversation) {
+      const id = conversation.id || conversation.conversationId || "unknown";
+      let customer = "Email conversation";
+
+      if (Array.isArray(conversation.participants)) {
+        const external = conversation.participants.find(p => p.purpose === "customer" || p.purpose === "external");
+        if (external) {
+          customer = external.name || external.address || external.email || customer;
+        }
+      }
+
+      return customer + " | " + id;
+    }
+
+    async function loadActiveEmails() {
+      setStatus("Loading active email conversations for this logged-in agent...");
+
+      const result = await conversationsApi.getConversationsEmails();
+      const entities = result.entities || [];
+
+      els.activeEmails.innerHTML = "";
+
+      if (!entities.length) {
+        els.activeEmailArea.classList.add("hidden");
+        setStatus("No active email conversations were returned for this agent. Make sure the agent has accepted/opened an email interaction.", "error");
+        return;
+      }
+
+      for (const c of entities) {
+        const id = c.id || c.conversationId;
+        if (!id) continue;
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = summarizeConversation(c);
+        els.activeEmails.appendChild(opt);
+      }
+
+      els.activeEmailArea.classList.remove("hidden");
+
+      if (!els.conversationId.value && els.activeEmails.options.length) {
+        els.conversationId.value = els.activeEmails.value;
+      }
+
+      setStatus("Loaded " + entities.length + " active email conversation(s). Select one, then inject the draft.", "success");
+    }
+
+    async function getCurrentDraft() {
+      const conversationId = els.conversationId.value.trim();
+      if (!conversationId) {
+        setStatus("Missing conversationId.", "error");
+        return;
+      }
+
+      setStatus("Reading current draft...");
+      try {
+        const draft = await conversationsApi.getConversationsEmailMessagesDraft(conversationId);
+        setStatus("Current draft:\n" + JSON.stringify(draft, null, 2), "success");
+      } catch (err) {
+        setStatus("Failed to get draft:\n" + formatError(err), "error");
+      }
+    }
+
+    async function injectDraft() {
+      const conversationId = els.conversationId.value.trim();
+      if (!conversationId) {
+        setStatus("Missing conversationId. Pass it in the URL or load active emails.", "error");
+        return;
+      }
+
+      const body = {
+        subject: els.subject.value,
+        textBody: els.textBody.value,
+        htmlBody: els.htmlBody.value,
+        historyIncluded: true,
+        draftType: "Reply"
+      };
+
+      setStatus("Updating email draft for conversation " + conversationId + "...");
+      try {
+        const response = await conversationsApi.putConversationsEmailMessagesDraft(conversationId, body);
+        setStatus("Draft injected successfully.\n\nResponse:\n" + JSON.stringify(response, null, 2), "success");
+      } catch (err) {
+        setStatus("Failed to inject draft:\n" + formatError(err), "error");
+      }
+    }
+
+    function formatError(err) {
+      if (!err) return "Unknown error";
+      if (err.body) return JSON.stringify(err.body, null, 2);
+      if (err.response && err.response.body) return JSON.stringify(err.response.body, null, 2);
+      if (err.message) return err.message;
+      try { return JSON.stringify(err, null, 2); } catch (e) { return String(err); }
+    }
+
+    els.region.addEventListener("change", () => {
+      try {
+        setRegion(els.region.value);
+        setStatus("Region set to " + els.region.value + ". Login again if you changed region after authenticating.");
+      } catch (err) {
+        setStatus(formatError(err), "error");
+      }
+    });
+
+    els.loginBtn.addEventListener("click", () => login().catch(err => setStatus("Login failed:\n" + formatError(err), "error")));
+    els.loadActiveBtn.addEventListener("click", () => loadActiveEmails().catch(err => setStatus("Failed to load active emails:\n" + formatError(err), "error")));
+    els.getDraftBtn.addEventListener("click", () => getCurrentDraft());
+    els.injectBtn.addEventListener("click", () => injectDraft());
+
+    els.activeEmails.addEventListener("change", () => {
+      els.conversationId.value = els.activeEmails.value;
+    });
+
+    (async function init() {
+      try {
+        applyUrlConfiguration();
+        if (CONFIG.autoLogin) {
+          await login();
+        } else {
+          setStatus("Ready. Click Login / Refresh Token.");
+        }
+      } catch (err) {
+        setStatus(formatError(err), "error");
+      }
+    })();
+  </script>
+</body>
+</html>

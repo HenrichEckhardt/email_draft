@@ -164,7 +164,7 @@
   <div class="card">
     <h1>Genesys Email Bot Draft Mockup</h1>
     <div class="small">
-      This widget simulates an email bot that prepares two possible answers. The agent selects one answer, then the widget reads the current active draft, inserts the selected answer before the detected signature/history area, discards the original draft, and recreates it with the complete merged content.
+      This widget simulates an email bot that prepares two possible answers. The agent selects one answer and an injection mode, then the widget reads the current active draft, merges the selected answer with the draft, discards the original draft, and recreates it with the complete merged content.
     </div>
 
     <label for="region">Genesys Cloud Region</label>
@@ -208,8 +208,16 @@
     <label for="selectedHtmlBody">Selected answer - HTML</label>
     <textarea id="selectedHtmlBody"></textarea>
 
+    <label for="injectionMode">Injection mode</label>
+    <select id="injectionMode">
+      <option value="beforeSignature" selected>Add selected answer before signature/history area</option>
+      <option value="before">Add selected answer before current draft content</option>
+      <option value="after">Add selected answer after current draft content</option>
+      <option value="replace">Replace current draft body with selected answer</option>
+    </select>
+
     <div class="notice">
-      The insertion point is detected using common signature/history markers such as HTML elements with class/id containing <strong>signature</strong>, a text signature delimiter <strong>--</strong>, quoted reply markers, or blockquote/history sections. If no marker is found, the selected answer is appended to the current draft body.
+      In <strong>before signature/history</strong> mode, the insertion point is detected using common markers such as HTML elements with class/id containing <strong>signature</strong>, a text signature delimiter <strong>--</strong>, quoted reply markers, or blockquote/history sections. If no marker is found, the selected answer is appended to the current draft body. The other modes preserve the same discard-and-recreate flow but place the selected answer before, after, or instead of the current draft body.
     </div>
 
     <div class="row">
@@ -292,6 +300,7 @@
       answerList: document.getElementById("answerList"),
       selectedTextBody: document.getElementById("selectedTextBody"),
       selectedHtmlBody: document.getElementById("selectedHtmlBody"),
+      injectionMode: document.getElementById("injectionMode"),
       status: document.getElementById("status")
     };
 
@@ -394,8 +403,12 @@
 
       const subject = getParam("subject");
       const answerId = getParam("answerId");
+      const injectionMode = getParam("injectionMode");
       if (subject) els.subject.value = subject;
       if (answerId && BOT_ANSWERS.some(a => a.id === answerId)) selectedAnswerId = answerId;
+      if (injectionMode && [...els.injectionMode.options].some(o => o.value === injectionMode)) {
+        els.injectionMode.value = injectionMode;
+      }
     }
 
     function applyUrlBodyOverrides() {
@@ -670,6 +683,41 @@
       return base.replace(/\s+$/g, "") + separator + add;
     }
 
+    function mergeHtmlByInjectionMode(selectedHtml, baseHtml, mode) {
+      const add = normalizeHtmlFragment(selectedHtml);
+      const base = baseHtml || "";
+      const separator = "<br>";
+
+      if (!add) return base;
+      if (mode === "replace") return add;
+      if (!base) return add;
+      if (mode === "before") return add + separator + base;
+      if (mode === "after") return base + separator + add;
+
+      // Default/recommended behavior: insert before detected signature/history.
+      return insertHtmlBeforeSignature(add, base);
+    }
+
+    function mergeTextByInjectionMode(selectedText, baseText, mode) {
+      const add = normalizeTextFragment(selectedText);
+      const base = baseText || "";
+      const separator = "\n\n";
+
+      if (!add) return base;
+      if (mode === "replace") return add;
+      if (!base) return add;
+      if (mode === "before") return add + separator + base.replace(/^\s+/g, "");
+      if (mode === "after") return base.replace(/\s+$/g, "") + separator + add;
+
+      // Default/recommended behavior: insert before detected signature/history.
+      return insertTextBeforeSignature(add, base);
+    }
+
+    function getInjectionModeLabel(mode) {
+      const option = [...els.injectionMode.options].find(o => o.value === mode);
+      return option ? option.textContent : "Add selected answer before signature/history area";
+    }
+
     function copyDraftMetadata(sourceDraft) {
       const update = {};
 
@@ -700,15 +748,18 @@
 
     function buildFinalDraftBody(sourceDraft) {
       const update = copyDraftMetadata(sourceDraft || {});
+      const mode = els.injectionMode.value || "beforeSignature";
 
-      update.textBody = insertTextBeforeSignature(
+      update.textBody = mergeTextByInjectionMode(
         els.selectedTextBody.value,
-        sourceDraft && sourceDraft.textBody
+        sourceDraft && sourceDraft.textBody,
+        mode
       );
 
-      update.htmlBody = insertHtmlBeforeSignature(
+      update.htmlBody = mergeHtmlByInjectionMode(
         els.selectedHtmlBody.value,
-        sourceDraft && sourceDraft.htmlBody
+        sourceDraft && sourceDraft.htmlBody,
+        mode
       );
 
       return update;
@@ -732,10 +783,13 @@
       }
 
       const selected = getSelectedAnswer();
+      const mode = els.injectionMode.value || "beforeSignature";
+      const modeLabel = getInjectionModeLabel(mode);
       setStatus(
         "Step 1/5: Reading the current active draft from Genesys Cloud...\n" +
         "Selected bot answer: " + selected.title + "\n" +
-        "The widget will insert this answer before the detected signature/history area, then discard and recreate the draft."
+        "Injection mode: " + modeLabel + "\n" +
+        "The widget will merge the selected answer using this mode, then discard and recreate the draft."
       );
 
       try {
@@ -755,7 +809,7 @@
 
         setStatus(
           "Step 1/5: Source draft available.\n" +
-          "Step 2/5: Inserting selected bot answer before signature/history marker..."
+          "Step 2/5: Applying injection mode: " + modeLabel + "..."
         );
 
         const finalBody = buildFinalDraftBody(sourceDraft || {});
@@ -771,9 +825,10 @@
         setStatus(
           "Draft recreated successfully with selected bot answer.\n\n" +
           (generatedBaseDraft
-            ? "No readable active draft existed, so the widget first asked Genesys Cloud to create/autofill a base reply draft, then inserted the selected bot answer.\n\n"
-            : "The widget read the current active draft, inserted the selected bot answer before the signature/history marker, discarded the old draft, and recreated it with the complete merged content.\n\n") +
-          "Selected answer: " + selected.title + "\n\n" +
+            ? "No readable active draft existed, so the widget first asked Genesys Cloud to create/autofill a base reply draft, then merged the selected bot answer using the selected injection mode.\n\n"
+            : "The widget read the current active draft, merged the selected bot answer using the selected injection mode, discarded the old draft, and recreated it with the complete merged content.\n\n") +
+          "Selected answer: " + selected.title + "\n" +
+          "Injection mode: " + modeLabel + "\n\n" +
           "Final PUT body:\n" + JSON.stringify(finalBody, null, 2) +
           "\n\nResponse:\n" + JSON.stringify(response, null, 2),
           "success"

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Genesys Email Draft Injector</title>
+  <title>Genesys Email Bot Draft Mockup</title>
 
   <!-- Genesys Cloud Platform API JavaScript SDK -->
   <script src="https://sdk-cdn.mypurecloud.com/javascript/latest/purecloud-platform-client-v2.min.js"></script>
@@ -28,7 +28,11 @@
     }
     h1 {
       font-size: 16px;
-      margin: 0 0 10px;
+      margin: 0 0 8px;
+    }
+    h2 {
+      font-size: 14px;
+      margin: 14px 0 8px;
     }
     label {
       display: block;
@@ -47,7 +51,7 @@
       background: #fff;
     }
     textarea {
-      min-height: 120px;
+      min-height: 110px;
       resize: vertical;
     }
     button {
@@ -80,6 +84,8 @@
       word-break: break-word;
       background: #eef3ff;
       border: 1px solid #c8d7ff;
+      max-height: 320px;
+      overflow: auto;
     }
     .status.error {
       background: #fff0f0;
@@ -97,13 +103,68 @@
     .hidden {
       display: none;
     }
+    .answer-list {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .answer-card {
+      border: 1px solid #d6dbe3;
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfcfe;
+      cursor: pointer;
+    }
+    .answer-card.selected {
+      border-color: #2f6fed;
+      background: #eef3ff;
+    }
+    .answer-card-header {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .answer-card input[type="radio"] {
+      width: auto;
+      margin-top: 2px;
+    }
+    .answer-title {
+      font-weight: 700;
+      margin-bottom: 3px;
+    }
+    .answer-summary {
+      color: #4f5b68;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #e7ebf2;
+      color: #384454;
+      font-size: 11px;
+      margin-left: 5px;
+      white-space: nowrap;
+    }
+    .notice {
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 5px;
+      background: #fff8e6;
+      border: 1px solid #f1d48a;
+      color: #5f4700;
+      font-size: 12px;
+      line-height: 1.35;
+    }
   </style>
 </head>
 <body>
   <div class="card">
-    <h1>Genesys Email Draft Injector</h1>
+    <h1>Genesys Email Bot Draft Mockup</h1>
     <div class="small">
-      This page logs in with the active agent's Genesys Cloud user context using OAuth PKCE, reads the current active email reply draft, merges the template content, discards the old draft, and recreates the draft with the merged content. If no draft exists, it creates one from the widget template.
+      This widget simulates an email bot that prepares two possible answers. The agent selects one answer, then the widget reads the current active draft, inserts the selected answer before the detected signature/history area, discards the original draft, and recreates it with the complete merged content.
     </div>
 
     <label for="region">Genesys Cloud Region</label>
@@ -134,29 +195,26 @@
       <select id="activeEmails"></select>
     </div>
 
-    <label for="subject">Subject</label>
-    <input id="subject" placeholder="Leave empty to preserve the generated Genesys reply subject" />
+    <label for="subject">Subject override</label>
+    <input id="subject" placeholder="Leave empty to preserve current draft subject" />
 
-    <label for="insertMode">Injection mode</label>
-    <select id="insertMode">
-      <option value="prepend">Add template before current draft content</option>
-      <option value="append">Add template after current draft content</option>
-      <option value="replace">Replace current draft body with template</option>
-    </select>
+    <h2>Email bot prepared answers</h2>
+    <div class="small">Select one mock answer. The selected content is editable before injection.</div>
+    <div id="answerList" class="answer-list"></div>
 
-    <label for="textBody">Plain Text Content To Add</label>
-    <textarea id="textBody">Hello,
+    <label for="selectedTextBody">Selected answer - plain text</label>
+    <textarea id="selectedTextBody"></textarea>
 
-This is a generated draft inserted by the external interaction widget.
+    <label for="selectedHtmlBody">Selected answer - HTML</label>
+    <textarea id="selectedHtmlBody"></textarea>
 
-</textarea>
-
-    <label for="htmlBody">HTML Content To Add</label>
-    <textarea id="htmlBody"><p>Hello,</p><p>This is a generated draft inserted by the external interaction widget.</p></textarea>
+    <div class="notice">
+      The insertion point is detected using common signature/history markers such as HTML elements with class/id containing <strong>signature</strong>, a text signature delimiter <strong>--</strong>, quoted reply markers, or blockquote/history sections. If no marker is found, the selected answer is appended to the current draft body.
+    </div>
 
     <div class="row">
       <button id="getDraftBtn" class="secondary" type="button" disabled>Get Current Draft</button>
-      <button id="injectBtn" type="button" disabled>Recreate Draft With Template</button>
+      <button id="injectBtn" type="button" disabled>Inject Selected Answer</button>
     </div>
 
     <div id="status" class="status">Initializing...</div>
@@ -173,7 +231,7 @@ This is a generated draft inserted by the external interaction widget.
      * https://YOUR_GITHUB_USER.github.io/YOUR_REPO/genesys-email-draft-widget.html
      **********************************************************************/
     const CONFIG = {
-       clientId: "21f0686f-cc19-43e5-bdfa-b074cbbe0479",
+      clientId: "21f0686f-cc19-43e5-bdfa-b074cbbe0479",
 
       // Must exactly match the URL configured on the OAuth client.
       // Leaving this as window.location.origin + window.location.pathname works well for GitHub Pages.
@@ -185,10 +243,37 @@ This is a generated draft inserted by the external interaction widget.
       // Automatically load active emails after login.
       autoLoadActiveEmails: true,
 
-      // Automatically inject into the existing current draft when autoInject=true appears in the URL.
-      // Example: ?conversationId=...&autoInject=true
+      // Automatically inject into the current draft when autoInject=true appears in the URL.
+      // Example: ?conversationId=...&autoInject=true&answerId=refundApproved
       allowAutoInjectFromUrl: true
     };
+
+    const BOT_ANSWERS = [
+      {
+        id: "refundApproved",
+        title: "Answer 1: Refund approved",
+        badge: "Recommended",
+        summary: "Confirms that the customer's refund request was approved and sets expectation for processing time.",
+        textBody:
+          "Hello,\n\nThank you for your patience. I reviewed your request and your refund has been approved. The refund should be processed back to the original payment method within 5 to 10 business days, depending on your bank or card provider.\n\nPlease let us know if you do not see the refund after that period.",
+        htmlBody:
+          "<p>Hello,</p>" +
+          "<p>Thank you for your patience. I reviewed your request and your refund has been approved. The refund should be processed back to the original payment method within <strong>5 to 10 business days</strong>, depending on your bank or card provider.</p>" +
+          "<p>Please let us know if you do not see the refund after that period.</p>"
+      },
+      {
+        id: "needMoreInfo",
+        title: "Answer 2: More information needed",
+        badge: "Alternative",
+        summary: "Asks the customer for missing details before the team can complete the request.",
+        textBody:
+          "Hello,\n\nThank you for contacting us. I can help with this request, but I need one more detail before I can complete the review.\n\nPlease reply with the order number, account reference, or any screenshot that shows the issue. Once we receive that information, we will continue the review and follow up with the next steps.",
+        htmlBody:
+          "<p>Hello,</p>" +
+          "<p>Thank you for contacting us. I can help with this request, but I need one more detail before I can complete the review.</p>" +
+          "<p>Please reply with the <strong>order number, account reference, or any screenshot</strong> that shows the issue. Once we receive that information, we will continue the review and follow up with the next steps.</p>"
+      }
+    ];
 
     const platformClient = require("platformClient");
     const client = platformClient.ApiClient.instance;
@@ -204,11 +289,13 @@ This is a generated draft inserted by the external interaction widget.
       activeEmailArea: document.getElementById("activeEmailArea"),
       activeEmails: document.getElementById("activeEmails"),
       subject: document.getElementById("subject"),
-      insertMode: document.getElementById("insertMode"),
-      textBody: document.getElementById("textBody"),
-      htmlBody: document.getElementById("htmlBody"),
+      answerList: document.getElementById("answerList"),
+      selectedTextBody: document.getElementById("selectedTextBody"),
+      selectedHtmlBody: document.getElementById("selectedHtmlBody"),
       status: document.getElementById("status")
     };
+
+    let selectedAnswerId = BOT_ANSWERS[0].id;
 
     function setStatus(message, type) {
       els.status.textContent = message;
@@ -237,6 +324,54 @@ This is a generated draft inserted by the external interaction widget.
       localStorage.setItem("gc_draft_widget_region", regionKey);
     }
 
+    function renderBotAnswers() {
+      els.answerList.innerHTML = "";
+
+      BOT_ANSWERS.forEach(answer => {
+        const wrapper = document.createElement("label");
+        wrapper.className = "answer-card" + (answer.id === selectedAnswerId ? " selected" : "");
+        wrapper.setAttribute("for", "answer_" + answer.id);
+
+        wrapper.innerHTML =
+          "<div class=\"answer-card-header\">" +
+          "<input type=\"radio\" name=\"botAnswer\" id=\"answer_" + escapeHtml(answer.id) + "\" value=\"" + escapeHtml(answer.id) + "\" " + (answer.id === selectedAnswerId ? "checked" : "") + ">" +
+          "<div>" +
+          "<div class=\"answer-title\">" + escapeHtml(answer.title) + "<span class=\"badge\">" + escapeHtml(answer.badge) + "</span></div>" +
+          "<div class=\"answer-summary\">" + escapeHtml(answer.summary) + "</div>" +
+          "</div>" +
+          "</div>";
+
+        wrapper.addEventListener("click", () => selectAnswer(answer.id));
+        els.answerList.appendChild(wrapper);
+      });
+
+      loadSelectedAnswerIntoEditors();
+    }
+
+    function selectAnswer(answerId) {
+      selectedAnswerId = answerId;
+      renderBotAnswers();
+    }
+
+    function getSelectedAnswer() {
+      return BOT_ANSWERS.find(a => a.id === selectedAnswerId) || BOT_ANSWERS[0];
+    }
+
+    function loadSelectedAnswerIntoEditors() {
+      const answer = getSelectedAnswer();
+      els.selectedTextBody.value = answer.textBody;
+      els.selectedHtmlBody.value = answer.htmlBody;
+    }
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
     function applyUrlConfiguration() {
       const savedRegion = localStorage.getItem("gc_draft_widget_region");
       const regionFromUrl = getFirstParam(["region", "gc_region", "environment"]);
@@ -258,16 +393,16 @@ This is a generated draft inserted by the external interaction widget.
       }
 
       const subject = getParam("subject");
+      const answerId = getParam("answerId");
+      if (subject) els.subject.value = subject;
+      if (answerId && BOT_ANSWERS.some(a => a.id === answerId)) selectedAnswerId = answerId;
+    }
+
+    function applyUrlBodyOverrides() {
       const textBody = getParam("textBody");
       const htmlBody = getParam("htmlBody");
-      const insertMode = getParam("insertMode");
-
-      if (subject) els.subject.value = subject;
-      if (textBody) els.textBody.value = textBody;
-      if (htmlBody) els.htmlBody.value = htmlBody;
-      if (insertMode && [...els.insertMode.options].some(o => o.value === insertMode)) {
-        els.insertMode.value = insertMode;
-      }
+      if (textBody) els.selectedTextBody.value = textBody;
+      if (htmlBody) els.selectedHtmlBody.value = htmlBody;
     }
 
     function requireConfiguredClientId() {
@@ -283,10 +418,10 @@ This is a generated draft inserted by the external interaction widget.
       setStatus("Authenticating with Genesys Cloud as the current agent...");
 
       // Persist token/settings across iframe reloads.
-      client.setPersistSettings(true, "gc_draft_widget");
+      client.setPersistSettings(true, "gc_draft_widget_bot_mockup");
 
       await client.loginPKCEGrant(CONFIG.clientId, CONFIG.redirectUri, {
-        state: "genesys-email-draft-widget"
+        state: "genesys-email-bot-draft-mockup"
       });
 
       els.loadActiveBtn.disabled = false;
@@ -299,7 +434,7 @@ This is a generated draft inserted by the external interaction widget.
       }
 
       if (CONFIG.allowAutoInjectFromUrl && getParam("autoInject") === "true") {
-        await injectDraft();
+        await injectSelectedAnswer();
       }
     }
 
@@ -346,7 +481,7 @@ This is a generated draft inserted by the external interaction widget.
         els.conversationId.value = els.activeEmails.value;
       }
 
-      setStatus("Loaded " + entities.length + " active email conversation(s). Select one, then inject the draft.", "success");
+      setStatus("Loaded " + entities.length + " active email conversation(s). Select one, then inject one of the mock bot answers.", "success");
     }
 
     async function getCurrentDraft() {
@@ -370,8 +505,6 @@ This is a generated draft inserted by the external interaction widget.
     }
 
     async function discardDraft(conversationId) {
-      // Genesys Cloud does not expose a DELETE draft endpoint in this API surface.
-      // PATCH with discard=true is the supported reset/discard operation.
       return conversationsApi.patchConversationsEmailMessagesDraft(conversationId, {
         discard: true,
         autoFill: false,
@@ -380,9 +513,6 @@ This is a generated draft inserted by the external interaction widget.
     }
 
     async function discardAndAutoFillDraft(conversationId) {
-      // Used only when there is no readable active draft. This asks Genesys Cloud
-      // to initialize a reply draft so we can preserve generated metadata such as
-      // from/to/subject/draftType before replacing the body with the widget template.
       return conversationsApi.patchConversationsEmailMessagesDraft(conversationId, {
         discard: true,
         autoFill: true,
@@ -419,10 +549,10 @@ This is a generated draft inserted by the external interaction widget.
       return hasDraftBody(draft) || hasDraftMetadata(draft);
     }
 
-    function hasTemplateContent() {
+    function hasSelectedContent() {
       return Boolean(
-        (els.htmlBody.value && els.htmlBody.value.trim()) ||
-        (els.textBody.value && els.textBody.value.trim())
+        (els.selectedHtmlBody.value && els.selectedHtmlBody.value.trim()) ||
+        (els.selectedTextBody.value && els.selectedTextBody.value.trim())
       );
     }
 
@@ -452,44 +582,97 @@ This is a generated draft inserted by the external interaction widget.
     }
 
     function normalizeHtmlFragment(html) {
-      const value = (html || "").trim();
-      if (!value) return "";
-      return value;
+      return (html || "").trim();
     }
 
     function normalizeTextFragment(text) {
-      const value = text || "";
-      return value.replace(/\s+$/g, "");
+      return (text || "").replace(/\s+$/g, "");
     }
 
-    function combineText(injectedText, baseText, mode) {
-      const add = normalizeTextFragment(injectedText);
-      const base = baseText || "";
+    function findHtmlInsertionIndex(baseHtml) {
+      const html = baseHtml || "";
+      const candidates = [];
 
-      if (mode === "replace") return add;
-      if (!add) return base;
-      if (!base) return add;
-      if (mode === "append") return base.replace(/\s+$/g, "") + "\n\n" + add;
-      return add + "\n\n" + base.replace(/^\s+/g, "");
+      // Signature DOM markers: class/id/name containing "signature".
+      const signatureAttr = /<[^>]*(?:class|id|name)\s*=\s*["'][^"']*signature[^"']*["'][^>]*>/ig;
+      let match;
+      while ((match = signatureAttr.exec(html)) !== null) candidates.push(match.index);
+
+      // Common text signature delimiter in HTML.
+      const delimiterPatterns = [
+        /(?:<br\s*\/?\s*>\s*){0,2}--\s*(?:<br\s*\/?\s*>|<\/p>|<\/div>)/i,
+        /<blockquote\b/i,
+        /<div[^>]*(?:class|id)\s*=\s*["'][^"']*(?:history|quoted|thread)[^"']*["'][^>]*>/i,
+        /On\s.+?wrote:/i,
+        /From:\s*[^<\n]+/i
+      ];
+
+      delimiterPatterns.forEach(pattern => {
+        const found = html.search(pattern);
+        if (found >= 0) candidates.push(found);
+      });
+
+      if (!candidates.length) return -1;
+      return Math.min(...candidates.filter(index => index >= 0));
     }
 
-    function combineHtml(injectedHtml, baseHtml, mode) {
-      const add = normalizeHtmlFragment(injectedHtml);
+    function findTextInsertionIndex(baseText) {
+      const text = baseText || "";
+      const candidates = [];
+      const patterns = [
+        /^--\s*$/m,
+        /^On\s.+?wrote:\s*$/mi,
+        /^From:\s*.+$/mi,
+        /^_{5,}\s*$/m,
+        /^-{5,}\s*$/m
+      ];
+
+      patterns.forEach(pattern => {
+        const match = text.match(pattern);
+        if (match && typeof match.index === "number") candidates.push(match.index);
+      });
+
+      if (!candidates.length) return -1;
+      return Math.min(...candidates.filter(index => index >= 0));
+    }
+
+    function insertHtmlBeforeSignature(selectedHtml, baseHtml) {
+      const add = normalizeHtmlFragment(selectedHtml);
       const base = baseHtml || "";
-
-      if (mode === "replace") return add;
       if (!add) return base;
       if (!base) return add;
-      if (mode === "append") return base + "<br>" + add;
-      return add + "<br>" + base;
+
+      const insertionIndex = findHtmlInsertionIndex(base);
+      const separator = "<br>";
+
+      if (insertionIndex >= 0) {
+        return base.slice(0, insertionIndex) + add + separator + base.slice(insertionIndex);
+      }
+
+      // Fallback: no detectable signature/history marker. Preserve the whole draft and append.
+      return base + separator + add;
+    }
+
+    function insertTextBeforeSignature(selectedText, baseText) {
+      const add = normalizeTextFragment(selectedText);
+      const base = baseText || "";
+      if (!add) return base;
+      if (!base) return add;
+
+      const insertionIndex = findTextInsertionIndex(base);
+      const separator = "\n\n";
+
+      if (insertionIndex >= 0) {
+        return base.slice(0, insertionIndex).replace(/\s+$/g, "") + separator + add + separator + base.slice(insertionIndex).replace(/^\s+/g, "");
+      }
+
+      // Fallback: no detectable signature/history marker. Preserve the whole draft and append.
+      return base.replace(/\s+$/g, "") + separator + add;
     }
 
     function copyDraftMetadata(sourceDraft) {
       const update = {};
 
-      // Preserve addressing and reply metadata from the active/generated draft.
-      // The user-visible body is rebuilt below; these fields maintain the same
-      // from/to/subject context after the original draft is discarded.
       [
         "to",
         "cc",
@@ -515,83 +698,88 @@ This is a generated draft inserted by the external interaction widget.
       return update;
     }
 
-    function buildMergedDraftBody(sourceDraft, options) {
-      const mode = options && options.templateOnly ? "replace" : (els.insertMode.value || "prepend");
+    function buildFinalDraftBody(sourceDraft) {
       const update = copyDraftMetadata(sourceDraft || {});
 
-      update.textBody = combineText(els.textBody.value, sourceDraft && sourceDraft.textBody, mode);
-      update.htmlBody = combineHtml(els.htmlBody.value, sourceDraft && sourceDraft.htmlBody, mode);
+      update.textBody = insertTextBeforeSignature(
+        els.selectedTextBody.value,
+        sourceDraft && sourceDraft.textBody
+      );
+
+      update.htmlBody = insertHtmlBeforeSignature(
+        els.selectedHtmlBody.value,
+        sourceDraft && sourceDraft.htmlBody
+      );
 
       return update;
     }
 
     async function recreateDraftFromFinalBody(conversationId, finalBody) {
       await discardDraft(conversationId);
-      // Give the email service a short moment to finish discarding before PUT.
       await sleep(300);
       return conversationsApi.putConversationsEmailMessagesDraft(conversationId, finalBody);
     }
 
-    async function injectDraft() {
+    async function injectSelectedAnswer() {
       const conversationId = els.conversationId.value.trim();
       if (!conversationId) {
         setStatus("Missing conversationId. Pass it in the URL or load active emails.", "error");
         return;
       }
-      if (!hasTemplateContent()) {
-        setStatus("Template content is empty. Add HTML and/or plain text content before injecting.", "error");
+      if (!hasSelectedContent()) {
+        setStatus("Selected answer content is empty. Select or edit one mock answer before injecting.", "error");
         return;
       }
 
+      const selected = getSelectedAnswer();
       setStatus(
         "Step 1/5: Reading the current active draft from Genesys Cloud...\n" +
-        "If a draft exists, it will be merged with the template, then discarded and recreated."
+        "Selected bot answer: " + selected.title + "\n" +
+        "The widget will insert this answer before the detected signature/history area, then discard and recreate the draft."
       );
 
       try {
         let sourceDraft = await readDraftOrNull(conversationId);
-        let createdFromTemplateOnly = false;
+        let generatedBaseDraft = false;
 
         if (!sourceDraft) {
           setStatus(
             "Step 1/5: No readable active draft was found.\n" +
-            "Step 2/5: Creating a base reply draft so Genesys Cloud provides from/to/subject metadata..."
+            "Step 2/5: Asking Genesys Cloud to create/autofill a base reply draft so from/to/subject/signature can be generated..."
           );
 
           const generated = await discardAndAutoFillDraft(conversationId);
           sourceDraft = await waitForDraftAfterAutoFill(conversationId, generated);
-          createdFromTemplateOnly = true;
+          generatedBaseDraft = true;
         }
 
         setStatus(
           "Step 1/5: Source draft available.\n" +
-          "Step 2/5: Building the final draft body " +
-          (createdFromTemplateOnly ? "from the widget template." : "by merging the widget template with the current draft.")
+          "Step 2/5: Inserting selected bot answer before signature/history marker..."
         );
 
-        const finalBody = buildMergedDraftBody(sourceDraft || {}, {
-          templateOnly: createdFromTemplateOnly && !hasDraftBody(sourceDraft)
-        });
+        const finalBody = buildFinalDraftBody(sourceDraft || {});
 
         setStatus(
           "Step 1/5: Source draft available.\n" +
-          "Step 2/5: Final draft body prepared.\n" +
-          "Step 3/5: Discarding the original draft..."
+          "Step 2/5: Final merged draft content prepared.\n" +
+          "Step 3/5: Discarding/closing the original server-side draft..."
         );
 
         const response = await recreateDraftFromFinalBody(conversationId, finalBody);
 
         setStatus(
-          "Draft recreated successfully.\n\n" +
-          (createdFromTemplateOnly
-            ? "No active draft existed, so the widget created a new reply draft from the template and preserved generated metadata where available.\n\n"
-            : "The widget read the current active draft, merged the template, discarded the original draft, and recreated it with the merged content.\n\n") +
+          "Draft recreated successfully with selected bot answer.\n\n" +
+          (generatedBaseDraft
+            ? "No readable active draft existed, so the widget first asked Genesys Cloud to create/autofill a base reply draft, then inserted the selected bot answer.\n\n"
+            : "The widget read the current active draft, inserted the selected bot answer before the signature/history marker, discarded the old draft, and recreated it with the complete merged content.\n\n") +
+          "Selected answer: " + selected.title + "\n\n" +
           "Final PUT body:\n" + JSON.stringify(finalBody, null, 2) +
           "\n\nResponse:\n" + JSON.stringify(response, null, 2),
           "success"
         );
       } catch (err) {
-        setStatus("Failed to recreate/update draft:\n" + formatError(err), "error");
+        setStatus("Failed to inject selected answer:\n" + formatError(err), "error");
       }
     }
 
@@ -615,7 +803,7 @@ This is a generated draft inserted by the external interaction widget.
     els.loginBtn.addEventListener("click", () => login().catch(err => setStatus("Login failed:\n" + formatError(err), "error")));
     els.loadActiveBtn.addEventListener("click", () => loadActiveEmails().catch(err => setStatus("Failed to load active emails:\n" + formatError(err), "error")));
     els.getDraftBtn.addEventListener("click", () => getCurrentDraft());
-    els.injectBtn.addEventListener("click", () => injectDraft());
+    els.injectBtn.addEventListener("click", () => injectSelectedAnswer());
 
     els.activeEmails.addEventListener("change", () => {
       els.conversationId.value = els.activeEmails.value;
@@ -624,6 +812,8 @@ This is a generated draft inserted by the external interaction widget.
     (async function init() {
       try {
         applyUrlConfiguration();
+        renderBotAnswers();
+        applyUrlBodyOverrides();
         if (CONFIG.autoLogin) {
           await login();
         } else {
